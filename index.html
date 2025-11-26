@@ -1,15 +1,493 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="fr">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ProdTracker - Suivi Logistique</title>
-    <!-- Ajout du script CDN Tailwind pour que le style fonctionne immédiatement sans config complexe -->
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ProdTracker - Logistique (Vercel Edition)</title>
+    
+    <!-- CHARGEMENT DES OUTILS (CDN) -->
     <script src="https://cdn.tailwindcss.com"></script>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/index.jsx"></script>
-  </body>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        @media print {
+            .no-print { display: none !important; }
+            body { background: white; }
+            ::-webkit-scrollbar { display: none; }
+        }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .animate-fade { animation: fadeIn 0.4s ease-out; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-900 font-sans h-screen overflow-hidden">
+
+    <div id="root" class="h-full"></div>
+
+    <script type="text/babel" data-type="module">
+        
+        const { useState, useEffect, useMemo } = React;
+
+        // ====================================================================================
+        // 💾 GESTIONNAIRE DE BASE DE DONNEES LOCALE (Remplacement de Firebase)
+        // ====================================================================================
+        const STORAGE_KEY = "prodtracker_db_v1";
+
+        const localDB = {
+            // Lire toutes les données
+            getAll: () => {
+                try {
+                    const data = localStorage.getItem(STORAGE_KEY);
+                    return data ? JSON.parse(data) : [];
+                } catch (e) { return []; }
+            },
+            // Ajouter une ligne
+            add: (item) => {
+                const current = localDB.getAll();
+                const newItem = { ...item, id: "id_" + Date.now() + Math.random().toString(36).substr(2, 9) };
+                const updated = [newItem, ...current];
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+                return updated;
+            },
+            // Mettre à jour une ligne
+            update: (id, changes) => {
+                const current = localDB.getAll();
+                const updated = current.map(item => item.id === id ? { ...item, ...changes } : item);
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+                return updated;
+            },
+            // Effacer tout (pour la démo)
+            clear: () => {
+                localStorage.removeItem(STORAGE_KEY);
+                return [];
+            }
+        };
+
+        // --- DONNEES DE DEMONSTRATION ---
+        const DEMO_DATA = [
+            { code: "5163", nomBrut: "LHERMITTE FREDERIC", nomNettoye: "LHERMITTE FREDERIC", agenceIdentifiee: "ADECCO", semaine: 47, annee: 2025, t_prep: 35, t_prod: 35, prod: 142, prod_coef: 148, distributed: false },
+            { code: "5163", nomBrut: "LHERMITTE FREDERIC", nomNettoye: "LHERMITTE FREDERIC", agenceIdentifiee: "ADECCO", semaine: 46, annee: 2025, t_prep: 35, t_prod: 35, prod: 135, prod_coef: 138, distributed: true },
+            { code: "8842", nomBrut: "DUBOIS THOMAS", nomNettoye: "DUBOIS THOMAS", agenceIdentifiee: "", semaine: 47, annee: 2025, t_prep: 35, t_prod: 35, prod: 115, prod_coef: 118, distributed: false },
+            { code: "9901", nomBrut: "MARTIN JULIE", nomNettoye: "MARTIN JULIE", agenceIdentifiee: "RANDSTAD", semaine: 47, annee: 2025, t_prep: 35, t_prod: 35, prod: 92, prod_coef: 95, distributed: false },
+        ];
+
+        const AGENCES = ["ADECCO", "RANDSTAD", "MANPOWER", "PROMAN", "CRIT", "SYNERGIE", "INTERIM", "SUPPLY", "LOGISTIC"];
+
+        // --- UTILITAIRES ---
+        const nettoyerNom = (nomBrut) => {
+            if (!nomBrut) return { nom: "", agence: "" };
+            let nom = nomBrut.toUpperCase();
+            let agenceTrouvee = "";
+            for (const agence of AGENCES) {
+                if (nom.includes(agence)) {
+                    agenceTrouvee = agence;
+                    nom = nom.replace(agence, "").trim();
+                    break; 
+                }
+            }
+            nom = nom.replace(/[^a-zA-Z ]/g, "").trim();
+            return { nom, agence: agenceTrouvee };
+        };
+
+        const getColorClass = (val) => {
+            if (val < 100) return "bg-red-100 text-red-800 border-red-200";
+            if (val >= 100 && val <= 130) return "bg-orange-100 text-orange-800 border-orange-200";
+            if (val > 130) return "bg-green-100 text-green-800 border-green-200";
+            return "bg-gray-100 text-gray-800";
+        };
+
+        // --- APPLICATION PRINCIPALE ---
+        function App() {
+            const [activeTab, setActiveTab] = useState('search');
+            const [database, setDatabase] = useState([]);
+            const [searchTerm, setSearchTerm] = useState('');
+            const [selectedPerson, setSelectedPerson] = useState(null);
+            const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+            const [notification, setNotification] = useState(null);
+            
+            // Etats Import/Export
+            const [importYear, setImportYear] = useState(new Date().getFullYear());
+            const [isUploading, setIsUploading] = useState(false);
+            const [extractPerson, setExtractPerson] = useState('');
+            const [extractStartWeek, setExtractStartWeek] = useState(1);
+            const [extractEndWeek, setExtractEndWeek] = useState(52);
+
+            // 1. CHARGEMENT INITIAL
+            useEffect(() => {
+                // On charge les données du LocalStorage au démarrage
+                const savedData = localDB.getAll();
+                setDatabase(savedData);
+                
+                if (window.lucide) window.lucide.createIcons();
+            }, []);
+
+            // Réinitialiser les icones après chaque rendu
+            useEffect(() => {
+                if (window.lucide) window.lucide.createIcons();
+            });
+
+            const showNotification = (msg, type) => {
+                setNotification({ msg, type });
+                setTimeout(() => setNotification(null), 4000);
+            };
+
+            // --- LOGIQUE METIER ---
+
+            // Chargement Données Démo
+            const loadDemoData = () => {
+                if (confirm("Cela va ajouter des données de test. Continuer ?")) {
+                    let currentData = localDB.getAll();
+                    DEMO_DATA.forEach(item => {
+                        currentData = localDB.add(item);
+                    });
+                    setDatabase(currentData);
+                    showNotification("Données démo ajoutées !", "success");
+                    setActiveTab('search');
+                }
+            };
+
+            // Reset Complet
+            const clearData = () => {
+                if (confirm("ATTENTION : Cela va effacer TOUTES les données de l'application sur cet appareil. Êtes-vous sûr ?")) {
+                    const empty = localDB.clear();
+                    setDatabase(empty);
+                    showNotification("Base de données effacée.", "success");
+                }
+            };
+
+            // Import Excel
+            const handleFileUpload = async (e) => {
+                const file = e.target.files ? e.target.files[0] : null;
+                if (!file) return;
+
+                const weekMatch = file.name.match(/(?:semaine|S)\s*(\d+)/i);
+                let semaineDetectee = weekMatch ? parseInt(weekMatch[1]) : null;
+                
+                if (!semaineDetectee) {
+                    const manual = prompt("Semaine non détectée. Veuillez saisir le numéro :");
+                    if (manual) semaineDetectee = parseInt(manual); else return;
+                }
+
+                setIsUploading(true);
+                const reader = new FileReader();
+                
+                reader.onload = async (evt) => {
+                    try {
+                        const wb = XLSX.read(evt.target.result, { type: 'binary' });
+                        const ws = wb.Sheets[wb.SheetNames[0]];
+                        const data = XLSX.utils.sheet_to_json(ws, { range: 2 });
+
+                        let count = 0;
+                        let currentData = [];
+
+                        for (const row of data) {
+                            const code = row['Code logarythme'] || row['__EMPTY'];
+                            const nomBrut = row['Nom/Prénom'] || row['__EMPTY_1'];
+                            
+                            if (code && nomBrut) {
+                                const { nom, agence } = nettoyerNom(nomBrut);
+                                const docData = {
+                                    code: String(code), nomBrut, nomNettoye: nom, agenceIdentifiee: agence,
+                                    semaine: semaineDetectee, annee: importYear,
+                                    t_prep: parseFloat(row['Temps préparation'] || 0),
+                                    t_prod: parseFloat(row['Temps productivité'] || 0),
+                                    prod: parseInt(row['Productivité'] || 0),
+                                    prod_coef: parseInt(row['Productivité avec coef.'] || 0),
+                                    distributed: false, updatedAt: new Date().toISOString()
+                                };
+                                currentData = localDB.add(docData); // Sauvegarde synchrone
+                                count++;
+                            }
+                        }
+                        setDatabase(currentData); // Mise à jour UI
+                        showNotification(`${count} lignes importées (Semaine ${semaineDetectee})`, "success");
+                    } catch (err) {
+                        console.error(err);
+                        showNotification("Erreur lecture Excel", "error");
+                    }
+                    setIsUploading(false);
+                    e.target.value = null;
+                };
+                reader.readAsBinaryString(file);
+            };
+
+            // Gestion Distribution
+            const toggleDistribution = (item) => {
+                const updated = localDB.update(item.id, { distributed: !item.distributed });
+                setDatabase(updated);
+                showNotification("Statut mis à jour", "success");
+            };
+
+            // --- CALCULS ---
+            const filteredList = useMemo(() => {
+                if (!searchTerm) return database;
+                const lowerTerm = searchTerm.toUpperCase();
+                return database.filter(item => 
+                    (item.code && item.code.includes(lowerTerm)) || 
+                    (item.nomNettoye && item.nomNettoye.includes(lowerTerm)) ||
+                    (item.nomBrut && item.nomBrut.toUpperCase().includes(lowerTerm))
+                );
+            }, [database, searchTerm]);
+
+            const uniquePersons = useMemo(() => {
+                const uniqueCodes = [...new Set(filteredList.map(i => i.code))];
+                return uniqueCodes.map(c => {
+                    const history = database.filter(d => d.code === c).sort((a,b) => {
+                        if (b.annee !== a.annee) return b.annee - a.annee;
+                        return b.semaine - a.semaine;
+                    });
+                    const current = history[0];
+                    const previous = history[1];
+                    let trend = 'stable';
+                    if (previous) {
+                        if (current.prod_coef > previous.prod_coef) trend = 'up';
+                        else if (current.prod_coef < previous.prod_coef) trend = 'down';
+                    }
+                    return { ...current, trend };
+                });
+            }, [filteredList, database]);
+
+            const extractionOptions = useMemo(() => {
+                const codes = [...new Set(database.map(i => i.code))];
+                return codes.map(c => {
+                    const p = database.find(d => d.code === c);
+                    return { code: c, nom: p ? p.nomNettoye : "Inconnu" };
+                }).sort((a,b) => a.nom.localeCompare(b.nom));
+            }, [database]);
+
+            // Extraction
+            const handleExtraction = () => {
+                if (!extractPerson) return showNotification("Sélectionner un préparateur", "error");
+                const data = database.filter(i => i.code === extractPerson && i.annee === extractYear && i.semaine >= extractStartWeek && i.semaine <= extractEndWeek).sort((a,b) => b.semaine - a.semaine);
+                if (data.length === 0) return showNotification("Aucune donnée trouvée", "error");
+                
+                // CSV Génération
+                const header = ["Semaine", "Annee", "Code", "Nom", "T.Prep", "T.Prod", "Prod Brute", "Prod Coef"];
+                const rows = data.map(d => [d.semaine, d.annee, d.code, d.nomNettoye, d.t_prep, d.t_prod, d.prod, d.prod_coef]);
+                const csvContent = "data:text/csv;charset=utf-8," + header.join(";") + "\n" + rows.map(r => r.join(";")).join("\n");
+                const link = document.createElement("a");
+                link.setAttribute("href", encodeURI(csvContent));
+                link.setAttribute("download", `extraction_${extractPerson}.csv`);
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                showNotification("Fichier CSV téléchargé !", "success");
+            };
+
+            const NavButton = ({ id, icon, label }) => (
+                <button onClick={() => { setActiveTab(id); setIsSidebarOpen(false); }}
+                    className={`flex items-center w-full p-4 space-x-3 transition-colors rounded-r-lg my-1 ${activeTab === id ? 'bg-blue-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-100'}`}>
+                    <i data-lucide={icon}></i><span className="font-medium">{label}</span>
+                </button>
+            );
+
+            return (
+                <div className="flex h-screen overflow-hidden">
+                    {/* SIDEBAR */}
+                    <div className={`fixed lg:static inset-y-0 left-0 z-30 w-72 bg-white border-r border-slate-200 transform transition-transform duration-200 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'} flex flex-col`}>
+                        <div className="p-6 border-b border-slate-100">
+                            <h1 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                                <i data-lucide="box" className="text-blue-600"></i> ProdTracker
+                            </h1>
+                            <p className="text-xs text-slate-400 mt-1 ml-8">Vercel Edition</p>
+                        </div>
+                        <nav className="mt-6 pr-4">
+                            <NavButton id="search" icon="search" label="Préparation" />
+                            <NavButton id="distribution" icon="check-circle" label="Distribution" />
+                            <NavButton id="extraction" icon="file-down" label="Extraction" />
+                            <NavButton id="data" icon="database" label="Données" />
+                        </nav>
+                        <div className="mt-auto p-4 border-t border-slate-100">
+                            <div className="text-xs text-slate-400 text-center">
+                                Données stockées sur cet appareil.<br/>(LocalStorage)
+                            </div>
+                        </div>
+                    </div>
+
+                    {isSidebarOpen && <div className="fixed inset-0 bg-black/50 z-20 lg:hidden" onClick={() => setIsSidebarOpen(false)} />}
+
+                    {/* MAIN CONTENT */}
+                    <div className="flex-1 flex flex-col h-full overflow-hidden">
+                        <header className="lg:hidden bg-white p-4 border-b flex justify-between items-center shadow-sm z-10">
+                            <span className="font-bold text-slate-800">ProdTracker</span>
+                            <button onClick={() => setIsSidebarOpen(true)} className="p-2 text-slate-600"><i data-lucide="menu"></i></button>
+                        </header>
+
+                        <main className="flex-1 overflow-y-auto p-4 lg:p-8 relative bg-slate-50">
+                            {notification && (
+                                <div className={`fixed top-4 right-4 z-50 px-6 py-4 rounded-xl shadow-xl flex items-center gap-3 text-sm font-bold animate-fade ${notification.type === 'success' ? 'bg-green-600 text-white' : 'bg-red-600 text-white'}`}>
+                                    <i data-lucide={notification.type === 'success' ? 'check' : 'alert-triangle'}></i> {notification.msg}
+                                </div>
+                            )}
+
+                            {/* --- SEARCH --- */}
+                            {activeTab === 'search' && (
+                                <div className="max-w-5xl mx-auto space-y-6">
+                                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+                                        <h2 className="text-2xl font-bold mb-4 text-slate-800">Recherche</h2>
+                                        <div className="relative">
+                                            <i data-lucide="search" className="absolute left-4 top-3.5 text-slate-400 w-5 h-5"></i>
+                                            <input type="text" className="w-full pl-12 pr-4 py-3 rounded-lg border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none" 
+                                                placeholder="Rechercher..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
+                                        </div>
+                                        {database.length === 0 && (
+                                            <div className="mt-6 text-center p-8 bg-slate-50 rounded-xl border border-dashed border-slate-300">
+                                                <p className="text-slate-600">Aucune donnée.</p>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="grid grid-cols-1 gap-4">
+                                        {uniquePersons.map(p => (
+                                            <div key={p.id} className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 hover:shadow-md transition-shadow animate-fade">
+                                                <div className="flex flex-col md:flex-row justify-between items-center gap-6">
+                                                    <div className="w-full">
+                                                        <div className="flex items-center gap-3 mb-1">
+                                                            <h3 className="text-lg font-bold text-slate-800">{p.nomNettoye}</h3>
+                                                            {p.agenceIdentifiee && <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-purple-100 text-purple-700">{p.agenceIdentifiee}</span>}
+                                                        </div>
+                                                        <div className="text-sm text-slate-500 flex gap-3">
+                                                            <span><i data-lucide="user" className="w-3 h-3 inline"></i> {p.code}</span>
+                                                            <span>S{p.semaine} ({p.annee})</span>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex items-center gap-6">
+                                                        <div className="flex flex-col items-center">
+                                                            <span className="text-[10px] uppercase text-slate-400 font-bold">Tendance</span>
+                                                            {p.trend === 'up' ? <i data-lucide="trending-up" className="text-green-600"></i> : p.trend === 'down' ? <i data-lucide="trending-down" className="text-red-600"></i> : <i data-lucide="minus" className="text-slate-400"></i>}
+                                                        </div>
+                                                        <div className="flex flex-col items-end">
+                                                            <span className="text-[10px] uppercase text-slate-400 font-bold">Coef.</span>
+                                                            <span className={`text-2xl font-black px-3 py-1 rounded-lg ${getColorClass(p.prod_coef)}`}>{p.prod_coef}</span>
+                                                        </div>
+                                                        <button onClick={() => setSelectedPerson(database.filter(d => d.code === p.code))} className="p-3 bg-slate-100 hover:bg-slate-200 rounded-xl"><i data-lucide="history"></i></button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* --- DISTRIBUTION --- */}
+                            {activeTab === 'distribution' && (
+                                <div className="max-w-5xl mx-auto space-y-6">
+                                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+                                        <h2 className="text-2xl font-bold mb-4 text-slate-800">Distribution</h2>
+                                        <div className="relative">
+                                            <i data-lucide="search" className="absolute left-4 top-3.5 text-slate-400 w-5 h-5"></i>
+                                            <input type="text" className="w-full pl-12 pr-4 py-3 rounded-lg border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none" 
+                                                placeholder="Filtrer..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-1 gap-3">
+                                        {uniquePersons.map(p => (
+                                            <div key={p.id} className={`bg-white rounded-xl shadow-sm border-l-[6px] p-5 flex flex-col md:flex-row justify-between items-center gap-4 animate-fade ${p.distributed ? 'border-l-green-500' : 'border-l-red-500'}`}>
+                                                <div>
+                                                    <div className="font-bold text-lg text-slate-800">{p.nomNettoye}</div>
+                                                    <div className="text-sm flex items-center gap-2 mt-1">
+                                                        <span className="text-slate-500">S{p.semaine}</span> | 
+                                                        <span className={`flex items-center gap-1 font-bold ${p.distributed ? 'text-green-600' : 'text-red-600'}`}>
+                                                            <i data-lucide={p.distributed ? "check-circle" : "circle"} className="w-4 h-4"></i>
+                                                            {p.distributed ? 'Communiqué' : 'À faire'}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                                <button onClick={() => toggleDistribution(p)} className={`px-5 py-2.5 rounded-lg text-sm font-bold text-white shadow-sm flex items-center gap-2 ${p.distributed ? 'bg-green-600' : 'bg-blue-600'}`}>
+                                                    {p.distributed ? 'Annuler' : <span><i data-lucide="check" className="w-4 h-4 inline mr-1"></i>Valider</span>}
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* --- EXTRACTION --- */}
+                            {activeTab === 'extraction' && (
+                                <div className="max-w-5xl mx-auto space-y-6">
+                                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+                                        <h2 className="text-2xl font-bold mb-6">Extraction</h2>
+                                        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
+                                            <div className="md:col-span-2">
+                                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5 ml-1">Personne</label>
+                                                <select className="w-full p-3 border border-slate-300 rounded-lg bg-white" value={extractPerson} onChange={e => setExtractPerson(e.target.value)}>
+                                                    <option value="">-- Choisir --</option>
+                                                    {extractionOptions.map(p => <option key={p.code} value={p.code}>{p.nom}</option>)}
+                                                </select>
+                                            </div>
+                                            <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1.5 ml-1">Début</label><input type="number" className="w-full p-3 border rounded-lg" value={extractStartWeek} onChange={e => setExtractStartWeek(parseInt(e.target.value))} /></div>
+                                            <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1.5 ml-1">Fin</label><input type="number" className="w-full p-3 border rounded-lg" value={extractEndWeek} onChange={e => setExtractEndWeek(parseInt(e.target.value))} /></div>
+                                        </div>
+                                        <button onClick={handleExtraction} className="w-full py-3 bg-slate-800 text-white rounded-lg font-bold">Télécharger CSV</button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* --- DONNEES --- */}
+                            {activeTab === 'data' && (
+                                <div className="max-w-5xl mx-auto space-y-6">
+                                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+                                        <h2 className="text-2xl font-bold mb-6">Import & Gestion</h2>
+                                        
+                                        <div className="mb-6">
+                                            <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Année</label>
+                                            <input type="number" className="w-full md:w-1/3 border p-3 rounded-lg" value={importYear} onChange={e => setImportYear(parseInt(e.target.value))} />
+                                        </div>
+
+                                        <div className={`border-3 border-dashed rounded-2xl p-12 text-center relative cursor-pointer hover:bg-slate-50 ${isUploading ? 'bg-blue-50' : ''}`}>
+                                            <input type="file" accept=".xlsx, .xls" onChange={handleFileUpload} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" disabled={isUploading} />
+                                            <div className="flex flex-col items-center gap-4 pointer-events-none">
+                                                <i data-lucide="upload-cloud" className="w-10 h-10 text-blue-500"></i>
+                                                <p className="font-bold text-slate-700">Glisser fichier Excel</p>
+                                            </div>
+                                            {isUploading && <div className="absolute inset-0 bg-white/90 flex items-center justify-center font-bold text-blue-600">Chargement...</div>}
+                                        </div>
+                                        
+                                        <div className="mt-10 pt-8 border-t border-slate-100 flex flex-col gap-4">
+                                            <button onClick={loadDemoData} className="w-full py-4 bg-purple-600 text-white rounded-xl font-bold flex items-center justify-center gap-3 shadow-md hover:bg-purple-700">
+                                                <i data-lucide="wand-2"></i> Ajouter Données Démo
+                                            </button>
+                                            <button onClick={clearData} className="w-full py-4 bg-red-100 text-red-600 rounded-xl font-bold flex items-center justify-center gap-3 hover:bg-red-200">
+                                                <i data-lucide="trash-2"></i> Tout effacer
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </main>
+                    </div>
+
+                    {/* MODALE */}
+                    {selectedPerson && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm print:hidden animate-fade">
+                            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[80vh] flex flex-col">
+                                <div className="p-6 border-b flex justify-between items-start">
+                                    <h3 className="font-bold text-2xl">{selectedPerson[0].nomNettoye}</h3>
+                                    <button onClick={() => setSelectedPerson(null)}><i data-lucide="x"></i></button>
+                                </div>
+                                <div className="p-0 overflow-y-auto">
+                                    <table className="w-full text-sm">
+                                        <thead className="bg-slate-50 text-slate-500 text-xs uppercase sticky top-0">
+                                            <tr><th className="py-4 px-6 text-left">Période</th><th className="py-4 px-6 text-right">Coef.</th></tr>
+                                        </thead>
+                                        <tbody>
+                                            {selectedPerson.map((row, i) => (
+                                                <tr key={i} className="border-b"><td className="py-4 px-6">S{row.semaine}/{row.annee}</td><td className="py-4 px-6 text-right font-black">{row.prod_coef}</td></tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
 </html>
